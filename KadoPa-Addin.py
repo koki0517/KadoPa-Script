@@ -144,13 +144,17 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             on_execute = CommandExecuteHandler()
             cmd.execute.add(on_execute)
             handlers.append(on_execute)
+            # プレビューイベントハンドラーを追加
+            on_preview = CommandExecuteHandler()
+            cmd.executePreview.add(on_preview)
+            handlers.append(on_preview)
             
         except:
             if ui:
                 ui.messageBox(f'コマンド作成失敗:\n{traceback.format_exc()}')
 
 class CommandExecuteHandler(adsk.core.CommandEventHandler):
-    """コマンド実行時のハンドラー"""
+    """コマンド実行時のハンドラー（プレビューと本実行を区別）"""
     def notify(self, args):
         try:
             cmd = args.command
@@ -267,26 +271,23 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                         if prof.profileLoops.count > 1:  # 外側＋内側ループ
                             profile = prof
                             break
-                
                 # 押し出しフィーチャーを作成
                 extrudes = component.features.extrudeFeatures
                 ext_input = extrudes.createInput(profile, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
-                
                 # 押し出し方向と距離を設定
                 if custom_direction:
-                    # カスタム方向が指定された場合
                     extent = adsk.fusion.DistanceExtentDefinition.create(adsk.core.ValueInput.createByReal(length))
                     ext_input.setOneSideExtent(extent, adsk.fusion.ExtentDirections.PositiveExtentDirection)
                     ext_input.direction = custom_direction
                 else:
-                    # デフォルトの法線方向
                     distance = adsk.fusion.DistanceExtentDefinition.create(adsk.core.ValueInput.createByReal(length))
                     ext_input.setOneSideExtent(distance, adsk.fusion.ExtentDirections.PositiveExtentDirection)
-                
                 extrude = extrudes.add(ext_input)
             
-            ui.messageBox(f'{pipe["width_mm"]}mm x {pipe["height_mm"]}mm t{pipe["thickness_mm"]} 長さ{length*10:.0f}mm のアルミ角パイプを作成しました。')
-            
+            # プレビュー時はメッセージを出さない
+            if hasattr(args, 'isExecute') and args.isExecute:
+                ui.messageBox(f'{pipe["width_mm"]}mm x {pipe["height_mm"]}mm t{pipe["thickness_mm"]} 長さ{length*10:.0f}mm のアルミ角パイプを作成しました。')
+        
         except:
             if ui:
                 ui.messageBox(f'実行失敗:\n{traceback.format_exc()}')
