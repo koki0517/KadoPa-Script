@@ -3,21 +3,24 @@
 import traceback
 import adsk.core
 import adsk.fusion
-import json
-import os
+import sys, os
+# モジュール検索パスにスクリプトディレクトリを追加
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+import data_loader
 
 app = adsk.core.Application.get()
 ui = app.userInterface
 
 # グローバル変数でハンドラーを保持
 handlers = []
-pipes_data = []
 
 def run(context):
     """アドイン開始時に呼ばれる関数"""
     try:
         # JSONファイルからアルミ角パイプ情報を読み込み
-        load_pipe_data()
+        data_loader.load_pipe_data()
         
         # コマンド定義を作成
         cmd_def = ui.commandDefinitions.addButtonDefinition(
@@ -64,17 +67,6 @@ def stop(context):
         if ui:
             ui.messageBox(f'アドイン停止失敗:\n{traceback.format_exc()}')
 
-def load_pipe_data():
-    """JSONファイルからパイプデータを読み込み"""
-    global pipes_data
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        json_path = os.path.join(script_dir, 'aluminum_pipes.json')
-        with open(json_path, 'r', encoding='utf-8') as f:
-            pipes_data = json.load(f)
-    except:
-        pipes_data = [{"width_mm": 10, "height_mm": 10, "thickness_mm": 1}]
-
 class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
     """コマンド作成時のハンドラー"""
     def notify(self, args):
@@ -90,7 +82,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             )
             
             # パイプデータをプルダウンに追加
-            for i, pipe in enumerate(pipes_data):
+            for i, pipe in enumerate(data_loader.pipes_data):
                 # 短縮表示
                 item_text = f'{pipe["width_mm"]}x{pipe["height_mm"]} t{pipe["thickness_mm"]}'
                 dropdown.listItems.add(item_text, i == 0, f'{pipe["width_mm"]}mm x {pipe["height_mm"]}mm t{pipe["thickness_mm"]}')  # 詳細はdescriptionに
@@ -167,7 +159,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             # 選択されたパイプを取得
             dropdown = inputs.itemById('pipeSelect')
             selected_index = dropdown.selectedItem.index
-            pipe = pipes_data[selected_index]
+            pipe = data_loader.pipes_data[selected_index]
             
             # 長さを取得
             length_input = inputs.itemById('pipeLength')
