@@ -3,21 +3,24 @@
 import traceback
 import adsk.core
 import adsk.fusion
-import json
-import os
+import sys, os
+# モジュール検索パスにスクリプトディレクトリを追加
+script_dir = os.path.dirname(os.path.abspath(__file__))
+if script_dir not in sys.path:
+    sys.path.insert(0, script_dir)
+import data_loader
 
 app = adsk.core.Application.get()
 ui = app.userInterface
 
 # グローバル変数でハンドラーを保持
 handlers = []
-pipes_data = []
 
 def run(context):
     """アドイン開始時に呼ばれる関数"""
     try:
         # JSONファイルからアルミ角パイプ情報を読み込み
-        load_pipe_data()
+        data_loader.load_pipe_data()
         
         # コマンド定義を作成
         cmd_def = ui.commandDefinitions.addButtonDefinition(
@@ -64,17 +67,6 @@ def stop(context):
         if ui:
             ui.messageBox(f'アドイン停止失敗:\n{traceback.format_exc()}')
 
-def load_pipe_data():
-    """JSONファイルからパイプデータを読み込み"""
-    global pipes_data
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        json_path = os.path.join(script_dir, 'aluminum_pipes.json')
-        with open(json_path, 'r', encoding='utf-8') as f:
-            pipes_data = json.load(f)
-    except:
-        pipes_data = [{"width_mm": 10, "height_mm": 10, "thickness_mm": 1}]
-
 class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
     """コマンド作成時のハンドラー"""
     def notify(self, args):
@@ -90,7 +82,7 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             )
             
             # パイプデータをプルダウンに追加
-            for i, pipe in enumerate(pipes_data):
+            for i, pipe in enumerate(data_loader.pipes_data):
                 # 短縮表示
                 item_text = f'{pipe["width_mm"]}x{pipe["height_mm"]} t{pipe["thickness_mm"]}'
                 dropdown.listItems.add(item_text, i == 0, f'{pipe["width_mm"]}mm x {pipe["height_mm"]}mm t{pipe["thickness_mm"]}')  # 詳細はdescriptionに
@@ -116,6 +108,20 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 'mm',
                 adsk.core.ValueInput.createByReal(0.0)
             )
+            # Zオフセット入力（追加）
+            z_offset_input = inputs.addValueInput(
+                'zOffset',
+                'Zオフセット (mm)',
+                'mm',
+                adsk.core.ValueInput.createByReal(0.0)
+            )
+            # 回転角度入力（追加）
+            rotate_input = inputs.addValueInput(
+                'rotateAngle',
+                '断面回転角度 (度)',
+                'deg',
+                adsk.core.ValueInput.createByString('0')
+            )
             
             # 平面選択（任意の平面を選択可能）
             plane_selection = inputs.addSelectionInput(
@@ -138,27 +144,30 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             origin_selection.addSelectionFilter('SketchPoints')
             origin_selection.setSelectionLimits(0, 1)  # 0または1つの点を選択
             
-            # 方向選択（オプション）
-            direction_selection = inputs.addSelectionInput(
-                'directionSelect',
-                '押し出し方向を選択（オプション）',
-                'エッジ、軸、またはベクトルを選択してください'
+            # 反転ボタン（追加）
+            reverse_input = inputs.addBoolValueInput(
+                'reverseDirection',
+                '反転',
+                False,
+                '',
+                False
             )
-            direction_selection.addSelectionFilter('LinearEdges')
-            direction_selection.addSelectionFilter('ConstructionLines')
-            direction_selection.setSelectionLimits(0, 1)  # 0または1つの方向を選択
             
             # 実行イベントハンドラーを追加
             on_execute = CommandExecuteHandler()
             cmd.execute.add(on_execute)
             handlers.append(on_execute)
+            # プレビューイベントハンドラーを追加
+            on_preview = CommandExecuteHandler()
+            cmd.executePreview.add(on_preview)
+            handlers.append(on_preview)
             
         except:
             if ui:
                 ui.messageBox(f'コマンド作成失敗:\n{traceback.format_exc()}')
 
 class CommandExecuteHandler(adsk.core.CommandEventHandler):
-    """コマンド実行時のハンドラー"""
+    """コマンド実行時のハンドラー（プレビューと本実行を区別）"""
     def notify(self, args):
         try:
             cmd = args.command
@@ -167,7 +176,7 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             # 選択されたパイプを取得
             dropdown = inputs.itemById('pipeSelect')
             selected_index = dropdown.selectedItem.index
-            pipe = pipes_data[selected_index]
+            pipe = data_loader.pipes_data[selected_index]
             
             # 長さを取得
             length_input = inputs.itemById('pipeLength')
@@ -190,18 +199,6 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 elif hasattr(origin_entity, 'worldGeometry'):
                     origin_point = origin_entity.worldGeometry
             
-            # 選択された方向を取得（オプション）
-            direction_selection = inputs.itemById('directionSelect')
-            custom_direction = None
-            if direction_selection.selectionCount > 0:
-                direction_entity = direction_selection.selection(0).entity
-                if hasattr(direction_entity, 'geometry'):
-                    if hasattr(direction_entity.geometry, 'direction'):
-                        custom_direction = direction_entity.geometry.direction
-                elif hasattr(direction_entity, 'worldGeometry'):
-                    if hasattr(direction_entity.worldGeometry, 'direction'):
-                        custom_direction = direction_entity.worldGeometry.direction
-            
             width = pipe['width_mm'] / 10  # mm→cm
             height = pipe['height_mm'] / 10  # mm→cm
             
@@ -212,6 +209,10 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 ui.messageBox('Fusionデザインがアクティブではありません。')
                 return
             rootComp = design.rootComponent
+
+            # タイムライングループ開始
+            timeline = design.timeline
+            group_start = timeline.markerPosition
             
             # 新しいコンポーネントを作成
             pipe_name = f'アルミ角パイプ_{pipe["width_mm"]}x{pipe["height_mm"]}_t{pipe["thickness_mm"]}_L{length*10:.0f}mm'
@@ -219,9 +220,41 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             occurrence.component.name = pipe_name
             component = occurrence.component
             
-            # 選択された平面でスケッチを作成
+            # スケッチ平面のZ方向オフセット
+            x_offset_input = inputs.itemById('xOffset')
+            y_offset_input = inputs.itemById('yOffset')
+            z_offset_input = inputs.itemById('zOffset')  # 追加
+            x_offset = x_offset_input.value if x_offset_input else 0.0
+            y_offset = y_offset_input.value if y_offset_input else 0.0
+            z_offset = z_offset_input.value if z_offset_input else 0.0
+            if abs(z_offset) > 1e-6:
+                # 選択平面からz_offset分だけオフセットしたコンストラクション平面を作成
+                planes = component.constructionPlanes
+                plane_input = planes.createInput()
+                offset_value = adsk.core.ValueInput.createByReal(z_offset)
+                plane_input.setByOffset(selected_plane, offset_value)
+                offset_plane = planes.add(plane_input)
+                sketch_plane = offset_plane
+            else:
+                sketch_plane = selected_plane
+            # 選択された平面（またはオフセット平面）でスケッチを作成
             sketches = component.sketches
-            sketch = sketches.add(selected_plane)
+
+            sketch = sketches.add(sketch_plane)
+            # スケッチ作成直後に既存ジオメトリを全削除（ただし原点は残す）
+            for curve in list(sketch.sketchCurves.sketchLines):
+                curve.deleteMe()
+            for curve in list(sketch.sketchCurves.sketchArcs):
+                curve.deleteMe()
+            for curve in list(sketch.sketchCurves.sketchCircles):
+                curve.deleteMe()
+            for curve in list(sketch.sketchCurves.sketchEllipses):
+                curve.deleteMe()
+            for curve in list(sketch.sketchCurves.sketchFittedSplines):
+                curve.deleteMe()
+            for curve in list(sketch.sketchCurves.sketchFixedSplines):
+                curve.deleteMe()
+            # スケッチ点（原点）は残す
             
             # 角パイプの断面を描画（中空の四角形）
             lines = sketch.sketchCurves.sketchLines
@@ -230,39 +263,49 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             # 原点を設定（選択された原点または0,0,0）
             x_offset_input = inputs.itemById('xOffset')
             y_offset_input = inputs.itemById('yOffset')
+            rotate_input = inputs.itemById('rotateAngle')
             x_offset = x_offset_input.value if x_offset_input else 0.0
             y_offset = y_offset_input.value if y_offset_input else 0.0
+            rotate_angle = rotate_input.value if rotate_input else 0.0  # ラジアン
             if origin_point:
                 # 選択された点をスケッチ座標系に変換
                 sketch_origin = sketch.modelToSketchSpace(origin_point)
-                base_x = sketch_origin.x + x_offset / 10  # mm→cm
-                base_y = sketch_origin.y + y_offset / 10
+                base_x = sketch_origin.x + x_offset
+                base_y = sketch_origin.y + y_offset
             else:
-                base_x = x_offset / 10  # mm→cm
-                base_y = y_offset / 10
-            
+                base_x = x_offset
+                base_y = y_offset
+            # 回転行列（原点中心、base_x,base_yは回転しない）
+            import math
+            cos_a = math.cos(rotate_angle)
+            sin_a = math.sin(rotate_angle)
+            def rot(x, y):
+                return (x * cos_a - y * sin_a, x * sin_a + y * cos_a)
             # 外側の四角形
-            p0 = adsk.core.Point3D.create(base_x, base_y, 0)
-            p1 = adsk.core.Point3D.create(base_x + width, base_y, 0)
-            p2 = adsk.core.Point3D.create(base_x + width, base_y + height, 0)
-            p3 = adsk.core.Point3D.create(base_x, base_y + height, 0)
-            lines.addByTwoPoints(p0, p1)
-            lines.addByTwoPoints(p1, p2)
-            lines.addByTwoPoints(p2, p3)
-            lines.addByTwoPoints(p3, p0)
-            
+            corners = [
+                (0, 0),
+                (width, 0),
+                (width, height),
+                (0, height)
+            ]
+            rot_corners = [rot(x, y) for x, y in corners]
+            points = [adsk.core.Point3D.create(base_x + x, base_y + y, 0) for x, y in rot_corners]
+            for i in range(4):
+                lines.addByTwoPoints(points[i], points[(i+1)%4])
             # 内側の四角形（中空部分）
             inner_width = width - 2 * thickness
             inner_height = height - 2 * thickness
             if inner_width > 0 and inner_height > 0:
-                ip0 = adsk.core.Point3D.create(base_x + thickness, base_y + thickness, 0)
-                ip1 = adsk.core.Point3D.create(base_x + width - thickness, base_y + thickness, 0)
-                ip2 = adsk.core.Point3D.create(base_x + width - thickness, base_y + height - thickness, 0)
-                ip3 = adsk.core.Point3D.create(base_x + thickness, base_y + height - thickness, 0)
-                lines.addByTwoPoints(ip0, ip1)
-                lines.addByTwoPoints(ip1, ip2)
-                lines.addByTwoPoints(ip2, ip3)
-                lines.addByTwoPoints(ip3, ip0)
+                inner_corners = [
+                    (thickness, thickness),
+                    (width - thickness, thickness),
+                    (width - thickness, height - thickness),
+                    (thickness, height - thickness)
+                ]
+                rot_inner = [rot(x, y) for x, y in inner_corners]
+                ipoints = [adsk.core.Point3D.create(base_x + x, base_y + y, 0) for x, y in rot_inner]
+                for i in range(4):
+                    lines.addByTwoPoints(ipoints[i], ipoints[(i+1)%4])
             
             # プロファイルを取得して押し出し
             profiles = sketch.profiles
@@ -275,26 +318,31 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                         if prof.profileLoops.count > 1:  # 外側＋内側ループ
                             profile = prof
                             break
-                
                 # 押し出しフィーチャーを作成
                 extrudes = component.features.extrudeFeatures
                 ext_input = extrudes.createInput(profile, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
-                
                 # 押し出し方向と距離を設定
-                if custom_direction:
-                    # カスタム方向が指定された場合
-                    extent = adsk.fusion.DistanceExtentDefinition.create(adsk.core.ValueInput.createByReal(length))
-                    ext_input.setOneSideExtent(extent, adsk.fusion.ExtentDirections.PositiveExtentDirection)
-                    ext_input.direction = custom_direction
-                else:
-                    # デフォルトの法線方向
-                    distance = adsk.fusion.DistanceExtentDefinition.create(adsk.core.ValueInput.createByReal(length))
-                    ext_input.setOneSideExtent(distance, adsk.fusion.ExtentDirections.PositiveExtentDirection)
-                
+                reverse_input = inputs.itemById('reverseDirection')
+                reverse = reverse_input.value if reverse_input else False
+                # 長さが負の場合は自動的に反転
+                extrude_length = abs(length)
+                is_negative = (length < 0)
+                reverse_final = reverse ^ is_negative  # どちらか一方がTrueなら反転
+                distance = adsk.fusion.DistanceExtentDefinition.create(adsk.core.ValueInput.createByReal(extrude_length))
+                direction_enum = adsk.fusion.ExtentDirections.NegativeExtentDirection if reverse_final else adsk.fusion.ExtentDirections.PositiveExtentDirection
+                ext_input.setOneSideExtent(distance, direction_enum)
                 extrude = extrudes.add(ext_input)
             
-            ui.messageBox(f'{pipe["width_mm"]}mm x {pipe["height_mm"]}mm t{pipe["thickness_mm"]} 長さ{length*10:.0f}mm のアルミ角パイプを作成しました。')
+            # タイムライングループ終了
+            group_end = timeline.markerPosition
+            if group_end > group_start + 1:
+                timelineGroups = timeline.timelineGroups
+                timelineGroups.add(group_start, group_end - 1)
             
+            # プレビュー時はメッセージを出さない
+            if hasattr(args, 'isExecute') and args.isExecute:
+                ui.messageBox(f'{pipe["width_mm"]}mm x {pipe["height_mm"]}mm t{pipe["thickness_mm"]} 長さ{length*10:.0f}mm のアルミ角パイプを作成しました。')
+        
         except:
             if ui:
                 ui.messageBox(f'実行失敗:\n{traceback.format_exc()}')
