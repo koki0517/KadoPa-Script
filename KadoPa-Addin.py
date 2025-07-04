@@ -229,6 +229,20 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             # 選択された平面（またはオフセット平面）でスケッチを作成
             sketches = component.sketches
             sketch = sketches.add(sketch_plane)
+            # スケッチ作成直後に既存ジオメトリを全削除（ただし原点は残す）
+            for curve in list(sketch.sketchCurves.sketchLines):
+                curve.deleteMe()
+            for curve in list(sketch.sketchCurves.sketchArcs):
+                curve.deleteMe()
+            for curve in list(sketch.sketchCurves.sketchCircles):
+                curve.deleteMe()
+            for curve in list(sketch.sketchCurves.sketchEllipses):
+                curve.deleteMe()
+            for curve in list(sketch.sketchCurves.sketchFittedSplines):
+                curve.deleteMe()
+            for curve in list(sketch.sketchCurves.sketchFixedSplines):
+                curve.deleteMe()
+            # スケッチ点（原点）は残す
             
             # 角パイプの断面を描画（中空の四角形）
             lines = sketch.sketchCurves.sketchLines
