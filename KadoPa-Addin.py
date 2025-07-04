@@ -108,6 +108,13 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
                 'mm',
                 adsk.core.ValueInput.createByReal(0.0)
             )
+            # Zオフセット入力（追加）
+            z_offset_input = inputs.addValueInput(
+                'zOffset',
+                'Zオフセット (mm)',
+                'mm',
+                adsk.core.ValueInput.createByReal(0.0)
+            )
             
             # 平面選択（任意の平面を選択可能）
             plane_selection = inputs.addSelectionInput(
@@ -130,15 +137,14 @@ class CommandCreatedHandler(adsk.core.CommandCreatedEventHandler):
             origin_selection.addSelectionFilter('SketchPoints')
             origin_selection.setSelectionLimits(0, 1)  # 0または1つの点を選択
             
-            # 方向選択（オプション）
-            direction_selection = inputs.addSelectionInput(
-                'directionSelect',
-                '押し出し方向を選択（オプション）',
-                'エッジ、軸、またはベクトルを選択してください'
+            # 反転ボタン（追加）
+            reverse_input = inputs.addBoolValueInput(
+                'reverseDirection',
+                '反転',
+                False,
+                '',
+                False
             )
-            direction_selection.addSelectionFilter('LinearEdges')
-            direction_selection.addSelectionFilter('ConstructionLines')
-            direction_selection.setSelectionLimits(0, 1)  # 0または1つの方向を選択
             
             # 実行イベントハンドラーを追加
             on_execute = CommandExecuteHandler()
@@ -186,18 +192,6 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 elif hasattr(origin_entity, 'worldGeometry'):
                     origin_point = origin_entity.worldGeometry
             
-            # 選択された方向を取得（オプション）
-            direction_selection = inputs.itemById('directionSelect')
-            custom_direction = None
-            if direction_selection.selectionCount > 0:
-                direction_entity = direction_selection.selection(0).entity
-                if hasattr(direction_entity, 'geometry'):
-                    if hasattr(direction_entity.geometry, 'direction'):
-                        custom_direction = direction_entity.geometry.direction
-                elif hasattr(direction_entity, 'worldGeometry'):
-                    if hasattr(direction_entity.worldGeometry, 'direction'):
-                        custom_direction = direction_entity.worldGeometry.direction
-            
             width = pipe['width_mm'] / 10  # mm→cm
             height = pipe['height_mm'] / 10  # mm→cm
             
@@ -215,9 +209,26 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             occurrence.component.name = pipe_name
             component = occurrence.component
             
-            # 選択された平面でスケッチを作成
+            # スケッチ平面のZ方向オフセット
+            x_offset_input = inputs.itemById('xOffset')
+            y_offset_input = inputs.itemById('yOffset')
+            z_offset_input = inputs.itemById('zOffset')  # 追加
+            x_offset = x_offset_input.value if x_offset_input else 0.0
+            y_offset = y_offset_input.value if y_offset_input else 0.0
+            z_offset = z_offset_input.value if z_offset_input else 0.0
+            if abs(z_offset) > 1e-6:
+                # 選択平面からz_offset分だけオフセットしたコンストラクション平面を作成
+                planes = component.constructionPlanes
+                plane_input = planes.createInput()
+                offset_value = adsk.core.ValueInput.createByReal(z_offset)
+                plane_input.setByOffset(selected_plane, offset_value)
+                offset_plane = planes.add(plane_input)
+                sketch_plane = offset_plane
+            else:
+                sketch_plane = selected_plane
+            # 選択された平面（またはオフセット平面）でスケッチを作成
             sketches = component.sketches
-            sketch = sketches.add(selected_plane)
+            sketch = sketches.add(sketch_plane)
             
             # 角パイプの断面を描画（中空の四角形）
             lines = sketch.sketchCurves.sketchLines
@@ -231,11 +242,11 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
             if origin_point:
                 # 選択された点をスケッチ座標系に変換
                 sketch_origin = sketch.modelToSketchSpace(origin_point)
-                base_x = sketch_origin.x + x_offset / 10  # mm→cm
-                base_y = sketch_origin.y + y_offset / 10
+                base_x = sketch_origin.x + x_offset
+                base_y = sketch_origin.y + y_offset
             else:
-                base_x = x_offset / 10  # mm→cm
-                base_y = y_offset / 10
+                base_x = x_offset
+                base_y = y_offset
             
             # 外側の四角形
             p0 = adsk.core.Point3D.create(base_x, base_y, 0)
@@ -275,13 +286,15 @@ class CommandExecuteHandler(adsk.core.CommandEventHandler):
                 extrudes = component.features.extrudeFeatures
                 ext_input = extrudes.createInput(profile, adsk.fusion.FeatureOperations.NewBodyFeatureOperation)
                 # 押し出し方向と距離を設定
-                if custom_direction:
-                    extent = adsk.fusion.DistanceExtentDefinition.create(adsk.core.ValueInput.createByReal(length))
-                    ext_input.setOneSideExtent(extent, adsk.fusion.ExtentDirections.PositiveExtentDirection)
-                    ext_input.direction = custom_direction
-                else:
-                    distance = adsk.fusion.DistanceExtentDefinition.create(adsk.core.ValueInput.createByReal(length))
-                    ext_input.setOneSideExtent(distance, adsk.fusion.ExtentDirections.PositiveExtentDirection)
+                reverse_input = inputs.itemById('reverseDirection')
+                reverse = reverse_input.value if reverse_input else False
+                # 長さが負の場合は自動的に反転
+                extrude_length = abs(length)
+                is_negative = (length < 0)
+                reverse_final = reverse ^ is_negative  # どちらか一方がTrueなら反転
+                distance = adsk.fusion.DistanceExtentDefinition.create(adsk.core.ValueInput.createByReal(extrude_length))
+                direction_enum = adsk.fusion.ExtentDirections.NegativeExtentDirection if reverse_final else adsk.fusion.ExtentDirections.PositiveExtentDirection
+                ext_input.setOneSideExtent(distance, direction_enum)
                 extrude = extrudes.add(ext_input)
             
             # プレビュー時はメッセージを出さない
